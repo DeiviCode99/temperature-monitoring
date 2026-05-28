@@ -1,192 +1,276 @@
-/*
- * Estaci�n Meteorol�gica IoT
- * ESP32 + DHT11 + BMP180 + FC-28 + LCD1602 I2C
- * Env�a datos a Django REST API cada 30 segundos
- */
-
+#include <Wire.h>
+#include <hd44780.h>
+#include <hd44780ioClass/hd44780_I2Cexp.h>
+#include <DHT.h>
+#include <Adafruit_BMP085.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <DHT.h>
-#include <Adafruit_BMP085.h>
-#include <LiquidCrystal_I2C.h>
 
-// ============ CONFIGURACI�N WIFI ============
-const char* SSID = "ESP32TEST";
-const char* PASSWORD = "12345678";
-
-// ============ CONFIGURACI�N API ============
-const char* API_URL = "http://192.168.1.100:8000/api/lecturas/";
-const char* API_KEY = "ESP32_API_KEY_2024";
-const char* DEVICE_ID = "ESP32_01";
-
-// ============ PINES ============
 #define DHTPIN 4
 #define DHTTYPE DHT11
-#define FC28_PIN 34
-#define BMP_SDA 21
-#define BMP_SCL 22
+#define FC28_ANALOGICO 34
 
-// ============ INSTANCIAS ============
+// Configuración WiFi
+const char* ssid = "DESKTOP-9577VQQ 9323";
+const char* password = "S065=z35";
+
+// Configuración API
+const char* serverUrl = "http://192.168.1.100:8000/api/lecturas/";
+const char* apiKey = "ESP32_API_KEY_2024";
+const char* deviceId = "ESP32_01";
+
+unsigned long lastSend = 0;
+const unsigned long sendInterval = 30000;  // 30 segundos
+
+TwoWire I2C_BMP = TwoWire(1);   // BMP180 -> SDA=21, SCL=22
+
+hd44780_I2Cexp lcd(0x27);       // LCD -> SDA=18, SCL=19
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_BMP085 bmp;
-LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// ============ VARIABLES GLOBALES ============
-unsigned long lastSend = 0;
-const unsigned long SEND_INTERVAL = 30000;
+int valorSeco = 3200;           // Ajusta con tu calibración real
+int valorMojado = 1400;         // Ajusta con tu calibración real
+int pantalla = 0;
+
+bool bmpOK = false;
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n=== Estaci�n Meteorol�gica IoT ===");
 
-  // Inicializar sensores
-  dht.begin();
-  lcd.init();
+  Wire.begin(18, 19);           // LCD
+  I2C_BMP.begin(21, 22);        // BMP180
+
+  lcd.begin(16, 2);
   lcd.backlight();
 
-  if (!bmp.begin()) {
-    Serial.println("Error: BMP180 no detectado");
+  dht.begin();
+  pinMode(FC28_ANALOGICO, INPUT);
+
+  bmpOK = bmp.begin(BMP085_STANDARD, &I2C_BMP);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Estacion Met");
+  lcd.setCursor(0, 1);
+  lcd.print("Iniciando...");
+  delay(2000);
+
+  if (!bmpOK) {
+    Serial.println("No se encontro el BMP180");
+    lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("BMP180 ERROR");
-  } else {
-    Serial.println("BMP180 OK");
+    lcd.print("BMP180 fallo");
+    lcd.setCursor(0, 1);
+    lcd.print("Seguimos...");
+    delay(2000);
   }
 
   // Conectar WiFi
-  conectarWiFi();
-
-  // Mostrar mensaje inicial en LCD
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Temp Monitor");
+  lcd.print("Conectando WiFi");
+  WiFi.mode(WIFI_STA);
+
+  // Escanear redes visibles
   lcd.setCursor(0, 1);
-  lcd.print("Conectando...");
-}
-
-void loop() {
-  // Verificar conexi�n WiFi
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi desconectado, reconectando...");
-    conectarWiFi();
-    return;
+  lcd.print("Escaneando...");
+  int redes = WiFi.scanNetworks();
+  Serial.print("Redes encontradas: ");
+  Serial.println(redes);
+  bool encontrada = false;
+  for (int i = 0; i < redes; i++) {
+    Serial.print("  ");
+    Serial.println(WiFi.SSID(i));
+    if (WiFi.SSID(i) == ssid) encontrada = true;
+  }
+  if (!encontrada) {
+    Serial.println("ERROR: No se ve la red '" + String(ssid) + "'");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("No ve la red:");
+    lcd.setCursor(0, 1);
+    lcd.print(ssid);
+    delay(4000);
   }
 
-  // Enviar datos cada 30 segundos
-  if (millis() - lastSend >= SEND_INTERVAL) {
-    lastSend = millis();
-    enviarLectura();
-  }
-
-  delay(1000);
-}
-
-void conectarWiFi() {
-  Serial.print("Conectando a WiFi");
-  WiFi.begin(SSID, PASSWORD);
-
+  WiFi.begin(ssid, password);
   int intentos = 0;
-  while (WiFi.status() != WL_CONNECTED && intentos < 40) {
+  while (WiFi.status() != WL_CONNECTED && intentos < 60) {
     delay(500);
+    lcd.setCursor(0, 1);
+    lcd.print(".");
     Serial.print(".");
     intentos++;
   }
-
+  Serial.println();
+  Serial.print("WiFi status: ");
+  Serial.println(WiFi.status());
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi conectado!");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("WiFi OK");
     lcd.setCursor(0, 1);
     lcd.print(WiFi.localIP());
+    Serial.print("Conectado WiFi. IP: ");
+    Serial.println(WiFi.localIP());
     delay(2000);
   } else {
-    Serial.println("\nError: No se pudo conectar WiFi");
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("WiFi ERROR");
+    lcd.print("WiFi fallo");
+    lcd.setCursor(0, 1);
+    lcd.print("Modo local");
+    delay(2000);
   }
 }
 
-void enviarLectura() {
-  // Leer sensores
-  float tempDHT = dht.readTemperature();
-  float humedad = dht.readHumidity();
-  float tempBMP = bmp.readTemperature();
-  float presion = bmp.readPressure();
-  int humedadSueloRaw = analogRead(FC28_PIN);
-  float humedadSuelo = map(humedadSueloRaw, 0, 4095, 100, 0);
-
-  // Validar NaN
-  if (isnan(tempDHT) || isnan(humedad)) {
-    Serial.println("Error: Lectura DHT11 fallida");
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("DHT ERROR");
+void enviarLectura(float t, float h, float tempBmp, int presBmp, int humedadSuelo, String estadoSuelo) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi no conectado, no se envia lectura");
     return;
   }
 
-  if (isnan(tempBMP) || isnan(presion)) {
-    Serial.println("Error: Lectura BMP180 fallida");
-  }
+  HTTPClient http;
+  http.begin(serverUrl);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-API-Key", apiKey);
 
-  // Determinar estado del suelo
-  String estadoSuelo = "Seco";
-  if (humedadSuelo > 70) {
-    estadoSuelo = "Mojado";
-  } else if (humedadSuelo > 30) {
-    estadoSuelo = "Humedo";
-  }
-
-  // Mostrar en LCD
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Temp: ");
-  lcd.print(tempDHT, 1);
-  lcd.print("C");
-
-  lcd.setCursor(0, 1);
-  lcd.print("Hume: ");
-  lcd.print(humedad, 1);
-  lcd.print("%");
-
-  // Construir JSON
   StaticJsonDocument<256> doc;
-  doc["device_id"] = DEVICE_ID;
-  doc["temperatura_dht"] = round(tempDHT * 10) / 10.0;
-  doc["humedad_ambiente"] = round(humedad * 10) / 10.0;
-  doc["temperatura_bmp"] = round(tempBMP * 10) / 10.0;
-  doc["presion"] = (int)presion;
-  doc["humedad_suelo"] = round(humedadSuelo * 10) / 10.0;
+  doc["device_id"] = deviceId;
+  doc["temperatura_dht"] = isnan(t) ? 0 : t;
+  doc["humedad_ambiente"] = isnan(h) ? 0 : h;
+  doc["temperatura_bmp"] = tempBmp;
+  doc["presion"] = presBmp;
+  doc["humedad_suelo"] = humedadSuelo;
   doc["estado_suelo"] = estadoSuelo;
 
-  // Serializar JSON
   String jsonString;
   serializeJson(doc, jsonString);
 
-  Serial.println("Enviando datos...");
-  Serial.println(jsonString);
-
-  // Enviar HTTP POST
-  HTTPClient http;
-  http.begin(API_URL);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("X-API-Key", API_KEY);
-
   int httpCode = http.POST(jsonString);
+
+  Serial.print("Enviando lectura... HTTP ");
+  Serial.println(httpCode);
 
   if (httpCode > 0) {
     String response = http.getString();
-    Serial.print("HTTP Response [");
-    Serial.print(httpCode);
-    Serial.print("]: ");
-    Serial.println(response);
-  } else {
-    Serial.print("Error HTTP: ");
-    Serial.println(http.errorToString(httpCode).c_str());
+    Serial.println("Respuesta: " + response);
   }
 
   http.end();
+}
+
+void loop() {
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+
+  int valorSuelo = analogRead(FC28_ANALOGICO);
+  int humedadSuelo = map(valorSuelo, valorSeco, valorMojado, 0, 100);
+  humedadSuelo = constrain(humedadSuelo, 0, 100);
+
+  String estadoSuelo = (humedadSuelo < 50) ? "Seco" : "Humedo";
+
+  float tempBmp = 0.0;
+  int presBmp = 0;
+
+  if (bmpOK) {
+    tempBmp = bmp.readTemperature();
+    presBmp = bmp.readPressure();
+  }
+
+  // Enviar datos cada sendInterval milisegundos
+  if (millis() - lastSend >= sendInterval) {
+    enviarLectura(t, h, tempBmp, presBmp, humedadSuelo, estadoSuelo);
+    lastSend = millis();
+  }
+
+  // Enviar JSON por Serial para el puente USB
+  StaticJsonDocument<256> serialDoc;
+  serialDoc["device_id"] = deviceId;
+  serialDoc["temperatura_dht"] = isnan(t) ? 0 : t;
+  serialDoc["humedad_ambiente"] = isnan(h) ? 0 : h;
+  serialDoc["temperatura_bmp"] = tempBmp;
+  serialDoc["presion"] = presBmp;
+  serialDoc["humedad_suelo"] = humedadSuelo;
+  serialDoc["estado_suelo"] = estadoSuelo;
+  serializeJson(serialDoc, Serial);
+  Serial.println();
+
+  lcd.clear();
+
+  if (pantalla == 0) {
+    lcd.setCursor(0, 0);
+    lcd.print("Temp: ");
+    lcd.print(isnan(t) ? 0 : t, 1);
+    lcd.print(" C");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Hum: ");
+    lcd.print(isnan(h) ? 0 : h, 1);
+    lcd.print(" %");
+  }
+  else if (pantalla == 1) {
+    lcd.setCursor(0, 0);
+    lcd.print("TmpB:");
+    lcd.print(bmpOK ? tempBmp : 0, 1);
+    lcd.print(" C");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Pres:");
+    lcd.print(bmpOK ? presBmp : 0);
+    lcd.print("Pa");
+  }
+  else if (pantalla == 2) {
+    lcd.setCursor(0, 0);
+    lcd.print("Suelo: ");
+    lcd.print(humedadSuelo);
+    lcd.print(" %");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Estado: ");
+    lcd.print(estadoSuelo);
+    if (estadoSuelo == "Seco") {
+      lcd.print("   ");
+    } else {
+      lcd.print(" ");
+    }
+  }
+
+  Serial.print("Hum ambiente: ");
+  Serial.print(h);
+  Serial.println(" %");
+
+  Serial.print("Temp DHT11: ");
+  Serial.print(t);
+  Serial.println(" C");
+
+  Serial.print("Valor analogico suelo: ");
+  Serial.println(valorSuelo);
+
+  Serial.print("Hum suelo: ");
+  Serial.print(humedadSuelo);
+  Serial.println(" %");
+
+  Serial.print("Estado suelo: ");
+  Serial.println(estadoSuelo);
+
+  if (bmpOK) {
+    Serial.print("Temp BMP180: ");
+    Serial.print(tempBmp);
+    Serial.println(" C");
+
+    Serial.print("Presion: ");
+    Serial.print(presBmp);
+    Serial.println(" Pa");
+  } else {
+    Serial.println("BMP180 no disponible");
+  }
+
+  Serial.println("-------------------");
+
+  pantalla++;
+  if (pantalla > 2) pantalla = 0;
+
+  delay(3000);
 }
